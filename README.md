@@ -197,4 +197,4 @@ MIT License — Part of the **Aura-3D** project.
 
 ---
 
-Built with 🐍 Python, 🎨 Blender, and 🤖 MediaPipe AI.
+Built with 🐍 Python, 🎨 Blender, and 🤖 MediaPipe AI..
