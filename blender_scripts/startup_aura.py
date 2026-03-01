@@ -81,18 +81,29 @@ def run_aura():
             raise FileNotFoundError(f"Missing script: {bridge_path}")
         _load_module_from_file("aura_gesture_bridge", bridge_path)
 
-        print("[Aura-3D] ✔ Setup complete.")
-        print("  ▶ Press N in the 3D Viewport -> 'Aura-3D' tab -> Start Bridge.")
+        print("[Aura-3D] Setup complete.")
+        print("  Bridge will auto-start in 3 seconds...")
+
+        # Auto-start the bridge after a short delay
+        def _auto_start_bridge():
+            try:
+                bpy.ops.aura.start_bridge()
+                print("[Aura-3D] Bridge auto-started!")
+            except Exception as ex:
+                print(f"[Aura-3D] Auto-start failed: {ex}")
+                print("  -> Press N in 3D Viewport -> 'Aura-3D' tab -> Start Bridge manually.")
+            return None  # Don't repeat
+        bpy.app.timers.register(_auto_start_bridge, first_interval=3.0)
 
     except Exception as e:
         import traceback
         print("\n" + "!" * 60)
-        print("  🚨 CRITICAL ERROR DURING STARTUP")
+        print("  CRITICAL ERROR DURING STARTUP")
         print(f"  {str(e)}")
         traceback.print_exc()
         print("!" * 60 + "\n")
 
-    print("═" * 60 + "\n")
+    print("=" * 60 + "\n")
 
 
 # Always register the delayed startup — works with both

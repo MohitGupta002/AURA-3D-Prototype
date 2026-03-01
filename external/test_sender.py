@@ -86,6 +86,51 @@ def build_sequence():
     return seq
 
 
+def interactive_mode(host, port):
+    """Interactive keyboard mode: type a shape name to send a DRAW_2D payload."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    VALID_SHAPES = {"CIRCLE", "OVAL", "SQUARE", "RECTANGLE", "TRIANGLE",
+                     "DIAMOND", "STAR", "LINE", "ARROW", "PENTAGON", "HEXAGON"}
+
+    print(f"\n  Aura-3D Interactive Shape Sender")
+    print(f"  Target : {host}:{port}")
+    print(f"  {'=' * 40}")
+    print(f"  Type a shape name and press Enter to send.")
+    print(f"  Valid shapes: {', '.join(sorted(VALID_SHAPES))}")
+    print(f"  Type 'q' to quit.")
+    print(f"  {'=' * 40}\n")
+
+    try:
+        while True:
+            user_input = input("  Shape> ").strip().upper()
+
+            if user_input in ('Q', 'QUIT', 'EXIT'):
+                print("  Bye!")
+                break
+
+            if user_input not in VALID_SHAPES:
+                print(f"  Unknown shape '{user_input}'. Try: {', '.join(sorted(VALID_SHAPES))}")
+                continue
+
+            # Build DRAW_2D payload with sensible defaults
+            payload = {
+                "action": "DRAW_2D",
+                "shape": user_input,
+                "center": [0.5, 0.5],
+                "size": 0.3,
+            }
+
+            raw = json.dumps(payload).encode("utf-8")
+            sock.sendto(raw, (host, port))
+            print(f"  >> Sent: {json.dumps(payload)}")
+
+    except KeyboardInterrupt:
+        print("\n\n  Stopped by user.")
+    finally:
+        sock.close()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Aura-3D Test Sender — simulates gesture UDP packets."
@@ -98,8 +143,16 @@ def main():
                         help=f"Packets per second  (default: {DEFAULT_FPS})")
     parser.add_argument("--loop", action="store_true",
                         help="Loop the sequence forever (Ctrl+C to stop)")
+    parser.add_argument("-i", "--interactive", action="store_true",
+                        help="Interactive mode: type shape names to send DRAW_2D payloads")
     args = parser.parse_args()
 
+    # ── Interactive mode ─────────────────────────────────
+    if args.interactive:
+        interactive_mode(args.host, args.port)
+        return
+
+    # ── Original automated mode ──────────────────────────
     sock     = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     interval = 1.0 / args.fps
 
@@ -107,7 +160,7 @@ def main():
     print(f"  Target : {args.host}:{args.port}")
     print(f"  Rate   : {args.fps} Hz")
     print(f"  Mode   : {'loop (Ctrl+C to stop)' if args.loop else 'single pass'}")
-    print(f"  {'─' * 40}\n")
+    print(f"  {'=' * 40}\n")
 
     try:
         pass_num = 0
@@ -117,7 +170,7 @@ def main():
             total = len(sequence)
 
             if args.loop:
-                print(f"  ── Pass #{pass_num} ({total} packets) ──")
+                print(f"  -- Pass #{pass_num} ({total} packets) --")
 
             for i, payload in enumerate(sequence):
                 payload["timestamp"] = time.time()
@@ -135,13 +188,14 @@ def main():
             if not args.loop:
                 break
 
-        print(f"\n  ✔ Sequence complete ({total} packets sent).\n")
+        print(f"\n  Done! Sequence complete ({total} packets sent).\n")
 
     except KeyboardInterrupt:
-        print(f"\n\n  ✖ Stopped by user (pass #{pass_num}).\n")
+        print(f"\n\n  Stopped by user (pass #{pass_num}).\n")
     finally:
         sock.close()
 
 
 if __name__ == "__main__":
     main()
+

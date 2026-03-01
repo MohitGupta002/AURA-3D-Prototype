@@ -11,15 +11,19 @@ import subprocess
 import argparse
 import time
 
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # ── Paths ───────────────────────────────────────────────────
 ROOT_DIR = os.path.dirname(os.path.realpath(__file__))
 BLENDER_PATH = r"D:\Blender\blender.exe"
 VENV_PYTHON = os.path.join(ROOT_DIR, "venv", "Scripts", "python.exe")
 
 def print_header(title):
-    print("\n" + "═"*60)
-    print(f"  🚀 Aura-3D  ·  {title}")
-    print("═"*60)
+    print("\n" + "="*60)
+    print(f"  Aura-3D  -  {title}")
+    print("="*60)
 
 def clean_port(port=9090):
     """Kills any process holding the target port to prevent WinError 10048."""
@@ -65,7 +69,7 @@ def launch_npu():
     npu_script = os.path.join(ROOT_DIR, "aura_npu.py")
     
     if not os.path.exists(VENV_PYTHON):
-        print(f"❌ Error: Virtual environment not found at {VENV_PYTHON}")
+        print(f"Error: Virtual environment not found at {VENV_PYTHON}")
         return
 
     # Quote paths for cmd /k. Windows cmd needs outer quotes if there are multiple quoted parts.

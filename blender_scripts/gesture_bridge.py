@@ -1,27 +1,14 @@
 # ============================================================
 #  Aura-3D  ·  Gesture Bridge  (Main Entry Point)
-#  ──────────────────────────────────────────────────────────
-#  The COMPLETE integration script.  This is the one you use
-#  in production.  It combines:
-#
-#    ✦ Non-blocking UDP listener  (via bpy.app.timers)
-#    ✦ Screen → World coordinate mapping
-#    ✦ Linear Interpolation (Lerp) for smooth motion
-#    ✦ Gesture → Action dispatch  (Move / Scale / Color / Orbit)
-#    ✦ Full Blender N-panel UI with live status
-#
-#  ▶ HOW TO RUN
-#    1. Run  scene_setup.py  first (adds Suzanne + material)
-#    2. Blender → Scripting → Open this file → Run Script
-#    3. Press N → "Aura-3D" tab → click "Start Bridge"
-#    4. In a separate terminal:
-#         python external/test_sender.py
-#    5. Watch Suzanne move, scale, change color, and the
-#       camera orbit — all with cinematic smoothness.
-#    6. Click "Stop Bridge" when done.
+#  Features:
+#    - Non-blocking UDP listener (bpy.app.timers)
+#    - Gesture -> Action dispatch (Move / Scale / Color / Orbit)
+#    - DRAW_2D: Spawn air-drawn shapes as 3D geometry
+#    - Lerp smoothing + full N-panel UI
 # ============================================================
 
 import bpy
+import bmesh
 import socket
 import json
 import math
@@ -45,7 +32,8 @@ from config import (
 )
 
 # ── Local overrides (you can tweak these here) ───────────────
-CONFIDENCE_THRESHOLD = 0.5   # ignore noisy frames below this
+CONFIDENCE_THRESHOLD = 0.5
+PALM_MOVE_SCALE = 2.0   # Multiply PALM movement range for wider positioning
 
 
 # ═════════════════════════════════════════════════════════════
@@ -108,8 +96,7 @@ def handle_move(obj, world_target):
 
 
 def handle_pinch(obj, world_target):
-    """Scale the object based on the X-axis value.
-    Screen x=0 → scale 0.5,  x=1 → scale 2.5."""
+    """Scale the object based on the X-axis value."""
     t = (world_target.x - WORLD_MIN) / (WORLD_MAX - WORLD_MIN)
     raw = 0.5 + t * 2.0
     target_scale = Vector((raw, raw, raw))
@@ -133,31 +120,275 @@ def handle_fist(obj, world_target):
             color = _COLORS[_color_idx % len(_COLORS)]
             bsdf.inputs["Base Color"].default_value = color
             _color_idx += 1
-            print(f"[Aura-3D]  🎨 Color → RGBA{color}")
+            print(f"[Aura-3D] Color -> RGBA{color}")
 
 
 def handle_palm(obj, world_target):
-    """Orbit the camera around the origin, driven by the hand's X position."""
-    camera = bpy.data.objects.get("Camera")
-    if not camera:
-        print("[Aura-3D] ⚠ No Camera in scene — PALM skipped.")
-        return
-
-    # Map world X to a full 360° sweep
-    t = (world_target.x - WORLD_MIN) / (WORLD_MAX - WORLD_MIN)
-    angle = t * math.tau  # 0 → 2π
-    radius = 8.0
-
-    orbit_target = Vector((
-        radius * math.cos(angle),
-        radius * math.sin(angle),
-        camera.location.z,
+    """Move the active object with wider range. Also gently orbits camera."""
+    # Move with amplified range for wider positioning
+    amplified = Vector((
+        world_target.x * PALM_MOVE_SCALE,
+        world_target.y * PALM_MOVE_SCALE,
+        world_target.z,
     ))
-    camera.location = lerp_vec(Vector(camera.location), orbit_target, LERP_FACTOR)
+    obj.location = lerp_vec(Vector(obj.location), amplified, LERP_FACTOR)
 
-    # Point camera at origin
-    look_dir = Vector((0, 0, 0)) - Vector(camera.location)
-    camera.rotation_euler = look_dir.to_track_quat('-Z', 'Y').to_euler()
+    # Also gently orbit camera
+    camera = bpy.data.objects.get("Camera")
+    if camera:
+        t = (world_target.x - WORLD_MIN) / (WORLD_MAX - WORLD_MIN)
+        angle = t * math.tau
+        radius = 8.0
+        orbit_target = Vector((
+            radius * math.cos(angle),
+            radius * math.sin(angle),
+            camera.location.z,
+        ))
+        camera.location = lerp_vec(Vector(camera.location), orbit_target, LERP_FACTOR * 0.3)
+        look_dir = Vector((0, 0, 0)) - Vector(camera.location)
+        camera.rotation_euler = look_dir.to_track_quat('-Z', 'Y').to_euler()
+
+
+# ═════════════════════════════════════════════════════════════
+#  DRAW_2D — Spawn Air-Drawn Shapes as 3D Geometry
+# ═════════════════════════════════════════════════════════════
+
+_AURA_TEAL = (0.0, 0.82, 0.72, 1.0)
+_draw_counter = 0
+_last_spawned = None   # Track last spawned object for gesture control
+
+
+def _get_aura_material():
+    """Get or create the teal Aura material for drawn shapes."""
+    mat_name = "Aura_DrawMat"
+    mat = bpy.data.materials.get(mat_name)
+    if mat is None:
+        mat = bpy.data.materials.new(name=mat_name)
+        mat.use_nodes = True
+        bsdf = mat.node_tree.nodes.get("Principled BSDF")
+        if bsdf:
+            bsdf.inputs["Base Color"].default_value = _AURA_TEAL
+            bsdf.inputs["Roughness"].default_value = 0.3
+            bsdf.inputs["Metallic"].default_value = 0.2
+    return mat
+
+
+def _apply_material(obj):
+    """Assign Aura teal material to an object."""
+    mat = _get_aura_material()
+    if obj.data.materials:
+        obj.data.materials[0] = mat
+    else:
+        obj.data.materials.append(mat)
+
+
+def _spawn_circle(name, world_pos, size):
+    """Spawn a torus/circle mesh."""
+    bpy.ops.mesh.primitive_circle_add(
+        vertices=64, radius=size, fill_type='NGON',
+        location=world_pos
+    )
+    obj = bpy.context.active_object
+    obj.name = name
+    _apply_material(obj)
+    # Add solidify for visibility
+    mod = obj.modifiers.new(name="Solidify", type='SOLIDIFY')
+    mod.thickness = size * 0.08
+    return obj
+
+
+def _spawn_oval(name, world_pos, size, aspect=1.5):
+    """Spawn an oval (scaled circle)."""
+    obj = _spawn_circle(name, world_pos, size)
+    obj.scale = (1.0, aspect, 1.0)
+    return obj
+
+
+def _spawn_square(name, world_pos, size):
+    """Spawn a square/plane."""
+    bpy.ops.mesh.primitive_plane_add(
+        size=size * 2, location=world_pos
+    )
+    obj = bpy.context.active_object
+    obj.name = name
+    _apply_material(obj)
+    # Solidify for 3D thickness
+    mod = obj.modifiers.new(name="Solidify", type='SOLIDIFY')
+    mod.thickness = size * 0.08
+    return obj
+
+
+def _spawn_rectangle(name, world_pos, size):
+    """Spawn a rectangle (scaled plane)."""
+    obj = _spawn_square(name, world_pos, size)
+    obj.scale = (1.0, 1.6, 1.0)
+    return obj
+
+
+def _spawn_triangle(name, world_pos, size):
+    """Spawn a triangle using bmesh."""
+    mesh = bpy.data.meshes.new(name + "_mesh")
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.collection.objects.link(obj)
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+    obj.location = Vector(world_pos)
+
+    bm = bmesh.new()
+    r = size
+    v1 = bm.verts.new((0, r, 0))
+    v2 = bm.verts.new((-r * 0.866, -r * 0.5, 0))
+    v3 = bm.verts.new((r * 0.866, -r * 0.5, 0))
+    bm.faces.new((v1, v2, v3))
+    bm.to_mesh(mesh)
+    bm.free()
+
+    _apply_material(obj)
+    mod = obj.modifiers.new(name="Solidify", type='SOLIDIFY')
+    mod.thickness = size * 0.08
+    return obj
+
+
+def _spawn_diamond(name, world_pos, size):
+    """Spawn a diamond (rotated square)."""
+    obj = _spawn_square(name, world_pos, size)
+    obj.rotation_euler = (0, 0, math.radians(45))
+    return obj
+
+
+def _spawn_star(name, world_pos, size):
+    """Spawn a 5-pointed star using bmesh."""
+    mesh = bpy.data.meshes.new(name + "_mesh")
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.collection.objects.link(obj)
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+    obj.location = Vector(world_pos)
+
+    bm = bmesh.new()
+    verts = []
+    for i in range(10):
+        angle = math.radians(i * 36 - 90)
+        r = size if i % 2 == 0 else size * 0.4
+        v = bm.verts.new((r * math.cos(angle), r * math.sin(angle), 0))
+        verts.append(v)
+    # Create faces as a fan from center
+    center = bm.verts.new((0, 0, 0))
+    for i in range(10):
+        bm.faces.new((center, verts[i], verts[(i+1) % 10]))
+    bm.to_mesh(mesh)
+    bm.free()
+
+    _apply_material(obj)
+    mod = obj.modifiers.new(name="Solidify", type='SOLIDIFY')
+    mod.thickness = size * 0.06
+    return obj
+
+
+def _spawn_polygon(name, world_pos, size, sides):
+    """Spawn a regular polygon (pentagon, hexagon)."""
+    bpy.ops.mesh.primitive_circle_add(
+        vertices=sides, radius=size, fill_type='NGON',
+        location=world_pos
+    )
+    obj = bpy.context.active_object
+    obj.name = name
+    _apply_material(obj)
+    mod = obj.modifiers.new(name="Solidify", type='SOLIDIFY')
+    mod.thickness = size * 0.08
+    return obj
+
+
+def _spawn_line(name, world_pos, size):
+    """Spawn a line (cylinder stretched)."""
+    bpy.ops.mesh.primitive_cylinder_add(
+        radius=size * 0.04, depth=size * 2,
+        location=world_pos
+    )
+    obj = bpy.context.active_object
+    obj.name = name
+    _apply_material(obj)
+    return obj
+
+
+def _spawn_arrow(name, world_pos, size):
+    """Spawn an arrow (cone + cylinder)."""
+    # Shaft
+    bpy.ops.mesh.primitive_cylinder_add(
+        radius=size * 0.04, depth=size * 1.5,
+        location=(world_pos[0], world_pos[1], world_pos[2])
+    )
+    shaft = bpy.context.active_object
+    shaft.name = name + "_shaft"
+    _apply_material(shaft)
+    # Head
+    bpy.ops.mesh.primitive_cone_add(
+        radius1=size * 0.15, depth=size * 0.4,
+        location=(world_pos[0], world_pos[1], world_pos[2] + size * 0.95)
+    )
+    head = bpy.context.active_object
+    head.name = name + "_head"
+    _apply_material(head)
+    # Parent head to shaft
+    head.parent = shaft
+    shaft.name = name
+    return shaft
+
+
+_SHAPE_SPAWN = {
+    "CIRCLE":    lambda n, p, s: _spawn_circle(n, p, s),
+    "OVAL":      lambda n, p, s: _spawn_oval(n, p, s),
+    "SQUARE":    lambda n, p, s: _spawn_square(n, p, s),
+    "RECTANGLE": lambda n, p, s: _spawn_rectangle(n, p, s),
+    "TRIANGLE":  lambda n, p, s: _spawn_triangle(n, p, s),
+    "DIAMOND":   lambda n, p, s: _spawn_diamond(n, p, s),
+    "STAR":      lambda n, p, s: _spawn_star(n, p, s),
+    "LINE":      lambda n, p, s: _spawn_line(n, p, s),
+    "ARROW":     lambda n, p, s: _spawn_arrow(n, p, s),
+    "PENTAGON":  lambda n, p, s: _spawn_polygon(n, p, s, 5),
+    "HEXAGON":   lambda n, p, s: _spawn_polygon(n, p, s, 6),
+}
+
+
+def handle_draw_2d(payload):
+    """Receive a DRAW_2D packet and spawn the shape in 3D."""
+    global _draw_counter, _last_spawned
+    shape  = payload.get("shape", "CIRCLE")
+    center = payload.get("center", [0.5, 0.5])
+    size   = payload.get("size", 0.3)
+
+    wx = screen_to_world(center[0])
+    wy = screen_to_world(center[1])
+    world_pos = (wx, wy, 0)
+    world_size = size * (WORLD_MAX - WORLD_MIN)
+
+    _draw_counter += 1
+    obj_name = f"Aura_{shape}_{_draw_counter:03d}"
+
+    spawner = _SHAPE_SPAWN.get(shape)
+    if spawner:
+        obj = spawner(obj_name, world_pos, world_size)
+        bpy.context.view_layer.objects.active = obj
+        obj.select_set(True)
+        _last_spawned = obj
+        print(f"[Aura-3D] Spawned {shape} as '{obj_name}' at ({wx:.1f}, {wy:.1f}) [ACTIVE]")
+    else:
+        print(f"[Aura-3D] Unknown shape: {shape}")
+
+
+def handle_erase():
+    """Erase the last spawned shape from the scene."""
+    global _last_spawned, _draw_counter
+    if _last_spawned and _last_spawned.name in bpy.data.objects:
+        obj_name = _last_spawned.name
+        # Remove children first (e.g., arrow head)
+        for child in list(_last_spawned.children):
+            bpy.data.objects.remove(child, do_unlink=True)
+        bpy.data.objects.remove(_last_spawned, do_unlink=True)
+        _last_spawned = None
+        print(f"[Aura-3D] Erased '{obj_name}'")
+    else:
+        print("[Aura-3D] Nothing to erase")
 
 
 # ── Dispatch table ───────────────────────────────────────────
@@ -187,9 +418,9 @@ def _open_socket():
         _udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         _udp_socket.setblocking(False)
         _udp_socket.bind((HOST, PORT))
-        print(f"[Aura-3D] ✔ Bridge bound to {HOST}:{PORT}")
+        print(f"[Aura-3D] Bridge bound to {HOST}:{PORT}")
     except Exception as e:
-        print(f"[Aura-3D] ❌ Failed to open socket: {e}")
+        print(f"[Aura-3D] Failed to open socket: {e}")
         raise e
 
 
@@ -202,7 +433,7 @@ def _close():
 
 
 def _tick():
-    """Timer callback — poll for one UDP packet, dispatch to handler."""
+    """Timer callback -- poll for one UDP packet, dispatch to handler."""
     global _is_running, _packet_count
 
     if not _is_running or _udp_socket is None:
@@ -212,6 +443,18 @@ def _tick():
         data, _ = _udp_socket.recvfrom(BUFFER_SIZE)
         payload = json.loads(data.decode("utf-8"))
 
+        # ── DRAW_2D action (from air-drawing) ────────────────
+        action = payload.get("action")
+        if action == "DRAW_2D":
+            _packet_count += 1
+            handle_draw_2d(payload)
+            return TIMER_INTERVAL
+        elif action == "ERASE":
+            _packet_count += 1
+            handle_erase()
+            return TIMER_INTERVAL
+
+        # ── Normal gesture dispatch ──────────────────────────
         gesture    = payload.get("gesture", "UNKNOWN")
         xyz        = payload.get("xyz", [0.5, 0.5, 0.5])
         confidence = payload.get("confidence", 0.0)
@@ -228,16 +471,16 @@ def _tick():
             handler(obj, world_xyz)
         elif not obj:
             if _packet_count % 120 == 1:
-                print("[Aura-3D] ⚠ No active object selected!")
+                print("[Aura-3D] No active object selected!")
         else:
-            print(f"[Aura-3D] ⚠ Unknown gesture: {gesture}")
+            print(f"[Aura-3D] Unknown gesture: {gesture}")
 
     except BlockingIOError:
         pass
     except json.JSONDecodeError as e:
-        print(f"[Aura-3D] ⚠ Bad JSON: {e}")
+        print(f"[Aura-3D] Bad JSON: {e}")
     except Exception as e:
-        print(f"[Aura-3D] ⚠ Error: {e}")
+        print(f"[Aura-3D] Error: {e}")
 
     return TIMER_INTERVAL
 
@@ -318,14 +561,16 @@ class AURA_PT_MainPanel(bpy.types.Panel):
         col = layout.column(align=True)
         col.scale_y = 0.85
         col.label(text="Gesture Map:", icon="INFO")
-        col.label(text="  MOVE / OPEN  →  Translate object")
-        col.label(text="  PINCH        →  Scale object")
-        col.label(text="  FIST         →  Cycle color")
-        col.label(text="  PALM         →  Orbit camera")
+        col.label(text="  MOVE / OPEN  ->  Translate object")
+        col.label(text="  PINCH        ->  Scale object")
+        col.label(text="  FIST         ->  Cycle color")
+        col.label(text="  PALM         ->  Orbit camera")
+        col.label(text="  AIR-DRAW     ->  Spawn 3D shape")
 
         layout.separator()
         col = layout.column(align=True)
         col.label(text=f"Lerp:  {LERP_FACTOR}   |   Gate:  {CONFIDENCE_THRESHOLD}")
+        col.label(text=f"Shapes spawned: {_draw_counter}")
 
 
 # ═════════════════════════════════════════════════════════════
@@ -354,5 +599,5 @@ def unregister():
 
 if __name__ == "__main__" or True:
     register()
-    print("[Aura-3D] ✔ Gesture Bridge registered.")
-    print("          Press N in 3D Viewport → Aura-3D tab → Start Bridge")
+    print("[Aura-3D] Gesture Bridge registered.")
+    print("          Press N in 3D Viewport -> Aura-3D tab -> Start Bridge")
